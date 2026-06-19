@@ -17,14 +17,20 @@ function init() {
     provider = new ethers.providers.JsonRpcProvider(rpc);
     if (pk) wallet = new ethers.Wallet(pk, provider);
     if (contractAddress) {
-      const abiPath = path.join(__dirname, '..', '..', 'contracts', 'artifacts', 'Escrow.json');
-      const raw = fs.readFileSync(abiPath, 'utf8');
-      const abi = JSON.parse(raw).abi;
-      const signer = wallet || provider.getSigner();
-      contract = new ethers.Contract(contractAddress, abi, signer);
+      // The contracts directory is at the repository root. From backend/src/services, go up three levels.
+      const abiPath = path.join(__dirname, '..', '..', '..', 'contracts', 'artifacts', 'Escrow.json');
+      if (!fs.existsSync(abiPath)) {
+        console.error('Escrow ABI not found at expected path:', abiPath);
+      } else {
+        const raw = fs.readFileSync(abiPath, 'utf8');
+        const abi = JSON.parse(raw).abi;
+        const signer = wallet || provider.getSigner();
+        contract = new ethers.Contract(contractAddress, abi, signer);
+      }
     }
 
-    ready = true;
+    // ready is true only if provider and contract and wallet (signer) are set; canAct() will still check contract+wallet.
+    ready = !!(provider);
   } catch (err) {
     console.warn('Contract service not initialized fully:', err.message);
   }
@@ -33,7 +39,7 @@ function init() {
 init();
 
 function canAct() {
-  return ready && contract && wallet;
+  return !!(contract && wallet);
 }
 
 async function releasePayment(jobId) {

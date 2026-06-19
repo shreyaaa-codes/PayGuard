@@ -8,8 +8,9 @@ const contractService = require('../services/contractService');
 // Create a job record in DB. Actual on-chain funding should be done by front-end calling the contract.
 exports.createJob = async (req, res) => {
   try {
-    const { title, metadataUri, freelancer, clientAddress, escrowAmount, txHash } = req.body;
-    const job = await Job.create({ title, metadataUri, freelancer, clientAddress, escrowAmount, txHash });
+    const { title, metadataUri, freelancer, clientAddress, escrowAmount, txHash, onchainJobId } = req.body;
+    // Persist onchainJobId if provided so backend can correlate with on-chain contract
+    const job = await Job.create({ title, metadataUri, freelancer, clientAddress, escrowAmount, txHash, onchainJobId });
     return res.status(201).json(job);
   } catch (err) {
     console.error(err);
@@ -46,7 +47,9 @@ exports.submitWork = async (req, res) => {
     await job.save();
 
     // Call AI review
-    const aiResult = await aiService.review(job.metadataUri, submissionUri);
+    // Use job.metadataUri as requirements; if metadataUri is a remote URI, backend should fetch content in a later enhancement.
+    const requirements = job.metadataUri || '';
+    const aiResult = await aiService.review(requirements, submissionUri);
 
     // Save review
     const review = await Review.create({ job: job._id, submission: submission._id, decision: aiResult.decision, confidence: aiResult.confidence, reason: aiResult.reason, automated: true });
@@ -55,7 +58,13 @@ exports.submitWork = async (req, res) => {
     if (aiResult.decision === 'APPROVED') {
       // Call contract to release funds - contractService wraps ethers.js
       if (contractService.canAct()) {
-        await contractService.releasePayment(job.chainJobId || job.onchainJobId);
+        // Ensure we have an onchainJobId; otherwise cannot call contract
+        const onchainId = job.onchainJobId || job.chainJobId;
+        if (typeof onchainId === 'number' || typeof onchainId === 'string') {
+          await contractService.releasePayment(Number(onchainId));
+        } else {
+          console.warn('No onchainJobId present for job', job._id);
+        }
       }
       job.status = 'approved';
       await job.save();
@@ -86,7 +95,12 @@ exports.escalate = async (req, res) => {
 
     // Optionally, call on-chain escalateDispute if front-end didn't
     if (contractService.canAct()) {
-      await contractService.escalateDispute(job.onchainJobId);
+      const onchainId = job.onchainJobId || job.chainJobId;
+      if (typeof onchainId === 'number' || typeof onchainId === 'string') {
+        await contractService.escalateDispute(Number(onchainId));
+      } else {
+        console.warn('No onchainJobId for escalate on job', job._id);
+      }
     }
 
     res.json({ ok: true });
@@ -108,12 +122,22 @@ exports.humanReview = async (req, res) => {
 
     if (approve) {
       if (contractService.canAct()) {
-        await contractService.resolveDispute(job.onchainJobId, true);
+        const onchainId = job.onchainJobId || job.chainJobId;
+        if (typeof onchainId === 'number' || typeof onchainId === 'string') {
+          await contractService.resolveDispute(Number(onchainId), true);
+        } else {
+          console.warn('No onchainJobId present for job', job._id);
+        }
       }
       job.status = 'approved';
     } else {
       if (contractService.canAct()) {
-        await contractService.resolveDispute(job.onchainJobId, false);
+        const onchainId = job.onchainJobId || job.chainJobId;
+        if (typeof onchainId === 'number' || typeof onchainId === 'string') {
+          await contractService.resolveDispute(Number(onchainId), false);
+        } else {
+          console.warn('No onchainJobId present for job', job._id);
+        }
       }
       job.status = 'rejected';
     }
@@ -123,5 +147,59 @@ exports.humanReview = async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Review failed' });
+  }
+};
+
+// New: reviewSubmission - trigger AI review manually (used by POST /api/review)
+exports.reviewSubmission = async (req, res) => {
+  try {
+    // Accept either: { jobId } to review the latest submission for a job
+    // or { requirements, submission } to run an ad-hoc review
+    const { jobId, requirements, submission } = req.body;
+
+    if (jobId) {
+      const job = await Job.findById(jobId).populate('latestSubmission').exec();
+      if (!job) return res.status(404).json({ error: 'Job not found' });
+      if (!job.latestSubmission) return res.status(400).json({ error: 'No submission found for this job' });
+
+      const submissionDoc = await Submission.findById(job.latestSubmission);
+      const reqText = job.metadataUri || requirements || '';
+      const submissionText = submission || submissionDoc.submissionUri;
+      const aiResult = await aiService.review(reqText, submissionText);
+
+      const review = await Review.create({ job: job._id, submission: submissionDoc._id, decision: aiResult.decision, confidence: aiResult.confidence, reason: aiResult.reason, automated: true });
+
+      // Optionally act on AI result (but do not change core flow): mirror the behavior of submitWork
+      if (aiResult.decision === 'APPROVED') {
+        if (contractService.canAct()) {
+          const onchainId = job.onchainJobId || job.chainJobId;
+          if (typeof onchainId === 'number' || typeof onchainId === 'string') {
+            await contractService.releasePayment(Number(onchainId));
+          } else {
+            console.warn('No onchainJobId present for job', job._id);
+          }
+        }
+        job.status = 'approved';
+      } else if (aiResult.decision === 'REJECTED') {
+        job.status = 'rejected';
+      } else {
+        job.status = 'escalated';
+      }
+
+      await job.save();
+
+      return res.json({ aiResult, review });
+    }
+
+    if (requirements && submission) {
+      const aiResult = await aiService.review(requirements, submission);
+      // Do not persist any DB state — this is an ad-hoc review
+      return res.json({ aiResult });
+    }
+
+    return res.status(400).json({ error: 'Provide jobId or requirements+submission' });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to run review' });
   }
 };
