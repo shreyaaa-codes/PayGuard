@@ -1,76 +1,60 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
+import DashboardCard from '../components/DashboardCard'
 import axios from 'axios'
-import { ethers } from 'ethers'
-import escrowAbi from '../contract/escrowAbi.json'
 
 export default function ClientDashboard(){
-  const [title, setTitle] = useState('')
-  const [metadata, setMetadata] = useState('')
-  const [freelancer, setFreelancer] = useState('')
-  const [amount, setAmount] = useState('')
-  const [status, setStatus] = useState('')
+  const [jobs, setJobs] = useState([])
+  const [loading, setLoading] = useState(true)
 
-  async function createJobOnchainAndRecord() {
-    if (!window.ethereum) return alert('Install MetaMask');
-    const provider = new ethers.providers.Web3Provider(window.ethereum);
-    const signer = provider.getSigner();
+  useEffect(()=>{ fetchJobs() }, [])
 
-    // Contract address should be in environment or config
-    const contractAddress = import.meta.env.VITE_CONTRACT_ADDRESS;
-    if (!contractAddress) return alert('Set VITE_CONTRACT_ADDRESS in .env');
-
-    const contract = new ethers.Contract(contractAddress, escrowAbi.abi, signer);
-
-    try {
-      setStatus('Sending transaction to fund escrow...');
-      const tx = await contract.createJob(freelancer, metadata, { value: ethers.utils.parseEther(amount) });
-      setStatus('Waiting for network confirmation...');
-      const receipt = await tx.wait();
-
-      // Parse JobCreated event to get onchain jobId safely
-      let jobId = null;
-      if (Array.isArray(receipt.events)) {
-        const event = receipt.events.find((e) => e.event === 'JobCreated' || (e.event === undefined && e.topics && String(e.topics[0]).includes('JobCreated')));
-        if (event && event.args && event.args.length > 0) {
-          try {
-            jobId = event.args[0];
-            // handle BigNumber
-            if (jobId && typeof jobId.toNumber === 'function') jobId = jobId.toNumber();
-          } catch (err) {
-            console.warn('Failed to parse jobId from event args', err);
-            jobId = null;
-          }
-        }
-      }
-
-      if (!jobId) {
-        setStatus('Transaction confirmed but JobCreated event not found — job will be recorded without onchainJobId.');
-      }
-
-      // Create job record in backend
-      setStatus('Recording job in backend...');
-      const clientAddress = await signer.getAddress();
-      const payload = { title, metadataUri: metadata, freelancer, clientAddress, escrowAmount: amount, txHash: receipt.transactionHash };
-      if (jobId !== null) payload.onchainJobId = jobId;
-
-      const res = await axios.post(`${import.meta.env.VITE_BACKEND_URL}/api/jobs`, payload);
-
-      setStatus('Job created: ' + res.data._id);
-    } catch (err) {
-      console.error(err);
-      setStatus('Failed: ' + (err.message || err));
-    }
+  async function fetchJobs(){
+    try{
+      setLoading(true)
+      const res = await axios.get(`${import.meta.env.VITE_BACKEND_URL}/api/jobs`)
+      setJobs(res.data)
+    }catch(err){ console.error(err) }
+    setLoading(false)
   }
 
   return (
-    <div className="space-y-4">
-      <h2 className="text-lg font-medium">Create Job & Fund Escrow</h2>
-      <input className="w-full p-2 border rounded" placeholder="Title" value={title} onChange={(e)=>setTitle(e.target.value)} />
-      <textarea className="w-full p-2 border rounded" placeholder="Requirements / metadata URI" value={metadata} onChange={(e)=>setMetadata(e.target.value)} />
-      <input className="w-full p-2 border rounded" placeholder="Freelancer wallet address" value={freelancer} onChange={(e)=>setFreelancer(e.target.value)} />
-      <input className="w-full p-2 border rounded" placeholder="Amount in ETH (e.g. 0.01)" value={amount} onChange={(e)=>setAmount(e.target.value)} />
-      <button onClick={createJobOnchainAndRecord} className="px-4 py-2 bg-green-600 text-white rounded">Create & Fund Escrow</button>
-      <div className="text-sm text-gray-600">{status}</div>
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <DashboardCard title="Active Escrows" value={jobs.length}>
+          Total jobs created
+        </DashboardCard>
+
+        <DashboardCard title="Funds Locked" value="0.12 ETH">
+          Aggregate value in escrow (demo)
+        </DashboardCard>
+
+        <DashboardCard title="Pending Reviews" value="2">
+          AI uncertain cases
+        </DashboardCard>
+      </div>
+
+      <div className="p-6 bg-black/40 rounded-xl border border-white/6">
+        <div className="flex items-center justify-between">
+          <div className="font-semibold text-white">Your Jobs</div>
+          <div className="text-sm text-gray-400">Recent</div>
+        </div>
+
+        <div className="mt-4 space-y-4">
+          {loading ? (
+            <div className="text-gray-400">Loading jobs...</div>
+          ) : (
+            jobs.map(j=> (
+              <div key={j._id} className="p-4 bg-white/2 rounded flex items-center justify-between">
+                <div>
+                  <div className="font-medium text-white">{j.title}</div>
+                  <div className="text-sm text-gray-400">Status: {j.status}</div>
+                </div>
+                <a href={`/job/${j._id}`} className="text-sm text-monad-600">View</a>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
     </div>
   )
 }
