@@ -1,0 +1,1 @@
+Update: add Home view to fix missing import and ensure frontend starts
