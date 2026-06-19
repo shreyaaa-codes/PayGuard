@@ -24,15 +24,36 @@ export default function ClientDashboard(){
     try {
       setStatus('Sending transaction to fund escrow...');
       const tx = await contract.createJob(freelancer, metadata, { value: ethers.utils.parseEther(amount) });
+      setStatus('Waiting for network confirmation...');
       const receipt = await tx.wait();
 
-      // Parse JobCreated event to get onchain jobId
-      const event = receipt.events.find((e) => e.event === 'JobCreated');
-      const jobId = event.args[0].toNumber();
+      // Parse JobCreated event to get onchain jobId safely
+      let jobId = null;
+      if (Array.isArray(receipt.events)) {
+        const event = receipt.events.find((e) => e.event === 'JobCreated' || (e.event === undefined && e.topics && String(e.topics[0]).includes('JobCreated')));
+        if (event && event.args && event.args.length > 0) {
+          try {
+            jobId = event.args[0];
+            // handle BigNumber
+            if (jobId && typeof jobId.toNumber === 'function') jobId = jobId.toNumber();
+          } catch (err) {
+            console.warn('Failed to parse jobId from event args', err);
+            jobId = null;
+          }
+        }
+      }
+
+      if (!jobId) {
+        setStatus('Transaction confirmed but JobCreated event not found — job will be recorded without onchainJobId.');
+      }
 
       // Create job record in backend
       setStatus('Recording job in backend...');
-      const res = await axios.post(`${import.meta.env.VITE_BACKEND_URL}/api/jobs`, { title, metadataUri: metadata, freelancer, clientAddress: await signer.getAddress(), escrowAmount: amount, txHash: receipt.transactionHash, onchainJobId: jobId });
+      const clientAddress = await signer.getAddress();
+      const payload = { title, metadataUri: metadata, freelancer, clientAddress, escrowAmount: amount, txHash: receipt.transactionHash };
+      if (jobId !== null) payload.onchainJobId = jobId;
+
+      const res = await axios.post(`${import.meta.env.VITE_BACKEND_URL}/api/jobs`, payload);
 
       setStatus('Job created: ' + res.data._id);
     } catch (err) {
