@@ -158,11 +158,21 @@ exports.reviewSubmission = async (req, res) => {
     const { jobId, requirements, submission } = req.body;
 
     if (jobId) {
+      // Populate latestSubmission if it's stored as an ObjectId; if already populated the result will be a doc
       const job = await Job.findById(jobId).populate('latestSubmission').exec();
       if (!job) return res.status(404).json({ error: 'Job not found' });
       if (!job.latestSubmission) return res.status(400).json({ error: 'No submission found for this job' });
 
-      const submissionDoc = await Submission.findById(job.latestSubmission);
+      // Support both populated submission doc and ObjectId
+      let submissionDoc = null;
+      if (typeof job.latestSubmission === 'object' && job.latestSubmission.submissionUri) {
+        submissionDoc = job.latestSubmission;
+      } else {
+        submissionDoc = await Submission.findById(job.latestSubmission);
+      }
+
+      if (!submissionDoc) return res.status(400).json({ error: 'Submission record not found' });
+
       const reqText = job.metadataUri || requirements || '';
       const submissionText = submission || submissionDoc.submissionUri;
       const aiResult = await aiService.review(reqText, submissionText);
